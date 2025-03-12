@@ -1,81 +1,98 @@
+import express from "express";
 import bodyParser from "body-parser";
-import express, { Request, Response } from "express";
-import { BASE_USER_PORT } from "../config";
+import axios from "axios";
+import { Node } from '../registry/registry';
+import { BASE_ONION_ROUTER_PORT, BASE_USER_PORT, REGISTRY_PORT } from "../config";
+import { rsaEncrypt, symEncrypt, exportSymKey, createRandomSymmetricKey, importSymKey } from '../crypto';
 
 export type SendMessageBody = {
   message: string;
   destinationUserId: number;
 };
 
-export type User = {
-  userId: number;
-  lastReceivedMessage: string | null;
-  lastSentMessage: string | null;
+let lastReceivedDecryptedMessage: string | null = null;
+let lastSendDecryptedMessage: string | null = null;
+export type circuitNode = {
+  nodeId: number;
+  pubKey: string;
 };
-
-const users: User[] = []; // Tableau pour stocker les utilisateurs et leurs messages reçus/envoyés
+let lastCircuit: circuitNode[] | null = null;
 
 export async function user(userId: number) {
-  let _lastReceivedMessage: string | null = null;
-  let _lastSentMessage: string | null = null;
-  const _user = express();
-  _user.use(express.json());
-  _user.use(bodyParser.json());
+    const _user = express();
+    _user.use(bodyParser.json());
+    _user.use(express.json());
 
-  // Route /status
-  _user.get("/status", (req, res) => {
-    res.send("live");
-  });
+    _user.get("/status", (_, res) => {
+        res.status(200).send("live");
+    });
 
-  // Route pour récupérer le dernier message reçu
-  _user.get("/getLastReceivedMessage", (req, res) => {
-    return res.json({ result: _lastReceivedMessage });
-  });
+    _user.get("/getLastReceivedMessage", (_, res) => {
+        res.status(200).json({ result: lastReceivedDecryptedMessage });
+    });
+    
+    _user.get("/getLastSentMessage", (_, res) => {  
+        res.status(200).json({ result: lastSendDecryptedMessage });
+    });
 
-  // Route pour récupérer le dernier message envoyé
-  _user.get("/getLastSentMessage", (req, res) => {
-    return res.status(404).json({ result: _lastSentMessage });
-  });
+    _user.post("/message", (req, res) => {
+        lastReceivedDecryptedMessage = req.body.message;
+        res.status(200).send("success");
+    });
 
-  // Route pour envoyer un message à un utilisateur
-  _user.post("/sendMessage", async (req: Request, res: Response) => {
-    const { message, destinationUserId }: { message: string, destinationUserId: number } = req.body;
-    _lastSentMessage = message;
-    await fetch(
-      `http://localhost:${BASE_USER_PORT + destinationUserId}/message`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message,
-        }),
-      }
-    ).then((test) => res.status(200).send("success"))
-  });
+    _user.get("/getLastCircuit", (_, res) => {
+        if (lastCircuit) {
+            res.status(200).json({ result: lastCircuit.map(node => node.nodeId) });
+        } else {
+            res.status(404).send("No circuit found");
+        }
+    });
 
-  // Route pour envoyer un message à un utilisateur
-  _user.post("/message", (req: Request, res: Response) => {
-    const { message }: { message: string } = req.body;
+    _user.post('/sendMessage', async (req, res) => {
+        const { message, destinationUserId } = req.body;
+        lastSendDecryptedMessage = message;
 
-    // Enregistrer le message reçu
-    _lastReceivedMessage = message;
+        try {
+            const response = await axios.get(`http://localhost:${REGISTRY_PORT}/getNodeRegistry`);
+            const nodes = response.data.nodes as Node[];
 
-    // // Si le message est destiné à un autre utilisateur, l'enregistrer aussi pour lui
-    // const destinationUser = users.find(
-    //   (u) => u.userId === req.body.destinationUserId
-    // );
-    // if (destinationUser) {
-    //   destinationUser.lastReceivedMessage = message;
-    // }
+            const circuit: circuitNode[] = [];
+            while (circuit.length < 3) {
+                const randomNode = nodes[Math.floor(Math.random() * nodes.length)];
+                if (!circuit.includes(randomNode)) {
+                    circuit.push(randomNode);
+                }
+            }
+            let destination = String(BASE_USER_PORT + destinationUserId).padStart(10, '0');
+            let encryptedMessage = message;
+            for (const node of circuit) {
+                const symKeyCrypto = await createRandomSymmetricKey();
+                const symKeyString = await exportSymKey(symKeyCrypto);
+                const symKey = await importSymKey(symKeyString);
+                
+                const tempMessage = await symEncrypt(symKey, destination + encryptedMessage);
+                destination = String(BASE_ONION_ROUTER_PORT + node.nodeId).padStart(10, '0');
+                const encryptedSymKey = await rsaEncrypt(symKeyString, node.pubKey);
+                encryptedMessage = encryptedSymKey + tempMessage;
+            }
+            circuit.reverse();
+            lastCircuit = circuit;
+            const entryNode = circuit[0];
+            
+            if (encryptedMessage) {
+                await axios.post(`http://localhost:${BASE_ONION_ROUTER_PORT + entryNode.nodeId}/message`, {
+                    message: encryptedMessage,
+                });
+                res.status(200).send('Message sent');
+            }
+        } catch (error) {
+            res.status(500).send('Error sending message');
+        }
+    });
 
-    res.status(200).send("success");
-  });
+    const server = _user.listen(BASE_USER_PORT + userId, () => {
+        console.log(`User ${userId} is listening on port ${BASE_USER_PORT + userId}`);
+    });
 
-  const server = _user.listen(BASE_USER_PORT + userId, () => {
-    console.log(`User ${userId} is listening on port ${BASE_USER_PORT + userId}`);
-  });
-
-  return server;
+    return server;
 }

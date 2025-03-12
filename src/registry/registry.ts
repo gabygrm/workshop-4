@@ -1,5 +1,5 @@
-import bodyParser from "body-parser";
 import express, { Request, Response } from "express";
+import bodyParser from "body-parser";
 import { REGISTRY_PORT } from "../config";
 
 export type Node = { nodeId: number; pubKey: string };
@@ -13,8 +13,6 @@ export type GetNodeRegistryBody = {
   nodes: Node[];
 };
 
-
-
 export async function launchRegistry() {
   const _registry = express();
   _registry.use(express.json());
@@ -27,10 +25,11 @@ export async function launchRegistry() {
   });
 
   _registry.post("/registerNode", (req: Request, res: Response) => {
-    console.log("Received body:", req.body); 
-    const { nodeId, pubKey}: RegisterNodeBody = req.body;
+    console.log("Received body:", req.body);
+    const { nodeId, pubKey }: RegisterNodeBody = req.body;
+    
     if (nodeId === undefined || pubKey === undefined || pubKey === "") {
-      return res.status(400).json({ error: "Missing nodeId, pubKey, or prvKey" });
+      return res.status(400).json({ error: "Missing nodeId or pubKey" });
     }
 
     if (nodeRegistry.some(node => node.nodeId === nodeId)) {
@@ -38,7 +37,6 @@ export async function launchRegistry() {
     }
 
     nodeRegistry.push({ nodeId, pubKey });
-
     return res.json({ message: "Node registered successfully" });
   });
 
